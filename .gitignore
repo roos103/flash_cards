@@ -1,0 +1,17 @@
+Ignore the user data folder where flashcards are stored
+
+user_data/
+
+Ignore Python cache files
+
+pycache/
+*.pyc
+
+Just in case, ignore any loose JSON files if you had them before
+
+*.json
+
+Ignore virtual environment (if you use one)
+
+.venv/
+env/
