@@ -10,7 +10,7 @@ import io
 DATA_FOLDER = "user_data"
 USERS_FILE = os.path.join(DATA_FOLDER, "users.json")
 
-st.set_page_config(page_title="Vibe Cards", page_icon="⚡", layout="centered")
+st.set_page_config(page_title="Vibe Cards", page_icon="⚡", layout="wide")
 
 # --- Helper Functions ---
 def ensure_data_folder():
@@ -37,34 +37,32 @@ def load_deck(username):
     deck_path = get_user_deck_file(username)
     if os.path.exists(deck_path):
         with open(deck_path, "r") as f:
-            return json.load(f)
+            data = json.load(f)
+            # Migration: If old format (list), convert to dict
+            if isinstance(data, list):
+                return {"Default": data}
+            return data
+            
     # Default starter deck for new users
-    return [
-        {
-            "id": 1, 
-            "front": f"Welcome {username}!", 
-            "back": "This is your private deck.", 
-            "enable_write": False, 
-            "enable_choice": False, 
-            "distractors": []
-        },
-        {
-            "id": 2, 
-            "front": "Type the answer: What is the capital of France?", 
-            "back": "Paris",
-            "enable_write": True,
-            "enable_choice": True,
-            "distractors": ["London", "Berlin", "Madrid"]
-        },
-    ]
+    return {
+        "Default": [
+            {
+                "id": 1, 
+                "front": f"Welcome {username}!", 
+                "back": "This is your private deck.", 
+                "enable_write": False, 
+                "enable_choice": False, 
+                "distractors": []
+            }
+        ]
+    }
 
-def save_deck(username, deck):
+def save_deck(username, deck_data):
     deck_path = get_user_deck_file(username)
     with open(deck_path, "w") as f:
-        json.dump(deck, f)
+        json.dump(deck_data, f)
 
 def check_similarity(user_input, correct_answer):
-    # Returns a ratio from 0.0 to 1.0
     return difflib.SequenceMatcher(None, user_input.lower().strip(), correct_answer.lower().strip()).ratio()
 
 # --- Session State Initialization ---
@@ -76,6 +74,20 @@ if "current_index" not in st.session_state:
     st.session_state.current_index = 0
 if "is_flipped" not in st.session_state:
     st.session_state.is_flipped = False
+if "active_list" not in st.session_state:
+    st.session_state.active_list = "Default"
+if "selected_card_ids" not in st.session_state:
+    st.session_state.selected_card_ids = set()
+
+# New State for Study Order
+if "study_order" not in st.session_state:
+    st.session_state.study_order = "Sequential" # or "Random"
+if "study_indices" not in st.session_state:
+    st.session_state.study_indices = []
+if "last_active_list" not in st.session_state:
+    st.session_state.last_active_list = ""
+if "last_deck_len" not in st.session_state:
+    st.session_state.last_deck_len = 0
 
 # --- UI Styling ---
 st.markdown("""
@@ -113,20 +125,6 @@ st.markdown("""
         border-radius: 12px;
         font-weight: 600;
     }
-    /* Style tabs */
-    .stTabs [data-baseweb="tab-list"] {
-        gap: 10px;
-    }
-    .stTabs [data-baseweb="tab"] {
-        height: 50px;
-        white-space: pre-wrap;
-        background-color: #1f2937;
-        border-radius: 4px;
-        color: #fff;
-    }
-    .stTabs [aria-selected="true"] {
-        background-color: #4f46e5;
-    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -134,7 +132,9 @@ st.markdown("""
 if not st.session_state.logged_in:
     st.markdown("## ⚡ **Vibe Cards**")
     
-    auth_mode = st.radio("Auth Mode", ["Login", "Sign Up"], horizontal=True, label_visibility="collapsed")
+    col1, col2 = st.columns([1,1])
+    with col1:
+        auth_mode = st.radio("Auth Mode", ["Login", "Sign Up"], horizontal=True, label_visibility="collapsed")
     
     if auth_mode == "Login":
         with st.form("login_form"):
@@ -148,7 +148,11 @@ if not st.session_state.logged_in:
                 if username_input in users and users[username_input] == password_input:
                     st.session_state.logged_in = True
                     st.session_state.username = username_input
-                    st.session_state.deck = load_deck(username_input)
+                    st.session_state.deck_data = load_deck(username_input)
+                    if "Default" in st.session_state.deck_data:
+                        st.session_state.active_list = "Default"
+                    else:
+                        st.session_state.active_list = list(st.session_state.deck_data.keys())[0]
                     st.success("Logged in!")
                     st.rerun()
                 else:
@@ -176,132 +180,263 @@ if not st.session_state.logged_in:
                         save_users(users)
                         st.success("Account created! Please log in.")
 
-# --- MAIN APP (Only shown if logged in) ---
+# --- MAIN APP ---
 else:
+    # --- SIDEBAR: LIST MANAGEMENT ---
+    with st.sidebar:
+        st.header(f"User: {st.session_state.username}")
+        if st.button("Logout"):
+            st.session_state.logged_in = False
+            st.rerun()
+            
+        st.divider()
+        st.subheader("🗂️ My Lists")
+        
+        # Ensure active list is valid
+        if st.session_state.active_list not in st.session_state.deck_data:
+            if st.session_state.deck_data:
+                st.session_state.active_list = list(st.session_state.deck_data.keys())[0]
+            else:
+                st.session_state.deck_data["Default"] = []
+                st.session_state.active_list = "Default"
+
+        # List Selector
+        list_names = list(st.session_state.deck_data.keys())
+        selected_list = st.selectbox("Select List", list_names, index=list_names.index(st.session_state.active_list))
+        
+        if selected_list != st.session_state.active_list:
+            st.session_state.active_list = selected_list
+            st.session_state.current_index = 0
+            st.session_state.is_flipped = False
+            st.rerun()
+            
+        st.divider()
+        
+        # Create New List
+        with st.popover("Create New List"):
+            new_list_name = st.text_input("New List Name")
+            if st.button("Create"):
+                if new_list_name and new_list_name not in st.session_state.deck_data:
+                    st.session_state.deck_data[new_list_name] = []
+                    save_deck(st.session_state.username, st.session_state.deck_data)
+                    st.session_state.active_list = new_list_name
+                    st.success(f"Created {new_list_name}")
+                    st.rerun()
+                elif new_list_name in st.session_state.deck_data:
+                    st.error("List already exists")
+
+        if len(list_names) > 1:
+            if st.button(f"Delete '{st.session_state.active_list}'"):
+                del st.session_state.deck_data[st.session_state.active_list]
+                st.session_state.active_list = list(st.session_state.deck_data.keys())[0]
+                save_deck(st.session_state.username, st.session_state.deck_data)
+                st.rerun()
+
+    # --- MAIN CONTENT ---
+    current_deck = st.session_state.deck_data[st.session_state.active_list]
+
     # App Header
-    col1, col2 = st.columns([1, 4])
-    with col1:
-        st.markdown(f"## ⚡ **{st.session_state.username}**")
-    with col2:
-        c2_1, c2_2 = st.columns([3, 1])
-        with c2_1:
-             mode = st.radio("Mode", ["Study", "Editor"], horizontal=True, label_visibility="collapsed")
-        with c2_2:
-             if st.button("Logout"):
-                 st.session_state.logged_in = False
-                 st.session_state.username = ""
-                 st.rerun()
+    col_h1, col_h2 = st.columns([3, 1])
+    with col_h1:
+        st.markdown(f"## ⚡ **{st.session_state.active_list}** ({len(current_deck)} cards)")
+    with col_h2:
+         mode = st.radio("Mode", ["Study", "Editor"], horizontal=True, label_visibility="collapsed")
 
     st.divider()
 
     # --- MODE: STUDY ---
     if mode == "Study":
-        if not st.session_state.deck:
-            st.info("No cards left! Go to Editor to create some.")
+        if not current_deck:
+            st.info("No cards in this list! Go to Editor to create some.")
         else:
-            if st.session_state.current_index >= len(st.session_state.deck):
+            # --- STUDY ORDER LOGIC ---
+            # Order Selector
+            c_ord1, c_ord2 = st.columns([1, 4])
+            with c_ord1:
+                st.caption("List Order")
+                new_order = st.selectbox("Order", ["Sequential", "Random"], label_visibility="collapsed", key="order_selector")
+
+            # Detect changes (List changed OR Mode changed OR Deck length changed)
+            needs_reshuffle = False
+            if new_order != st.session_state.study_order:
+                st.session_state.study_order = new_order
+                needs_reshuffle = True
+            
+            if st.session_state.active_list != st.session_state.last_active_list:
+                st.session_state.last_active_list = st.session_state.active_list
+                needs_reshuffle = True
+            
+            if len(current_deck) != st.session_state.last_deck_len:
+                st.session_state.last_deck_len = len(current_deck)
+                needs_reshuffle = True
+
+            # If tracking array is empty/mismatched size, we also need to shuffle
+            if len(st.session_state.study_indices) != len(current_deck):
+                needs_reshuffle = True
+
+            # Perform the shuffle/reset if needed
+            if needs_reshuffle:
+                st.session_state.current_index = 0
+                st.session_state.is_flipped = False
+                if st.session_state.study_order == "Random":
+                    indices = list(range(len(current_deck)))
+                    random.shuffle(indices)
+                    st.session_state.study_indices = indices
+                else:
+                    st.session_state.study_indices = list(range(len(current_deck)))
+            
+            # --- DISPLAY CARD ---
+            # Safety check: ensure current_index is valid
+            if st.session_state.current_index >= len(st.session_state.study_indices):
                  st.session_state.current_index = 0
             
-            if st.session_state.deck:
-                card = st.session_state.deck[st.session_state.current_index]
+            # Map visual index -> Real card index
+            real_index = st.session_state.study_indices[st.session_state.current_index]
+            card = current_deck[real_index]
+            
+            # Determine available modes
+            available_tabs = ["Flip"]
+            if card.get("enable_write", False):
+                available_tabs.append("Type")
+            if card.get("enable_choice", False) and card.get("distractors"):
+                available_tabs.append("Quiz")
+
+            tabs = st.tabs(available_tabs)
+
+            # TAB 1: FLIP
+            with tabs[0]:
+                content = card["back"] if st.session_state.is_flipped else card["front"]
+                label = "ANSWER" if st.session_state.is_flipped else "QUESTION"
                 
-                # Determine available modes for this card
-                available_tabs = ["Flip"]
-                if card.get("enable_write", False):
-                    available_tabs.append("Type")
-                if card.get("enable_choice", False) and card.get("distractors"):
-                    available_tabs.append("Quiz")
+                st.markdown(f"""
+                <div class="card-container">
+                    <div class="label-text">{label}</div>
+                    <div class="card-text">{content}</div>
+                </div>
+                """, unsafe_allow_html=True)
+                
+                flip_label = "Show Question" if st.session_state.is_flipped else "Reveal Answer"
+                if st.button(flip_label, use_container_width=True):
+                    st.session_state.is_flipped = not st.session_state.is_flipped
+                    st.rerun()
 
-                # Create Tabs
-                tabs = st.tabs(available_tabs)
+            # TAB 2: TYPE
+            if "Type" in available_tabs:
+                with tabs[available_tabs.index("Type")]:
+                    st.subheader("Type your answer:")
+                    st.info(card["front"])
+                    user_type_input = st.text_input("Your Answer", key=f"type_{card['id']}")
+                    if user_type_input:
+                        similarity = check_similarity(user_type_input, card["back"])
+                        if similarity == 1.0:
+                            st.success(f"Correct! {card['back']}")
+                            st.balloons()
+                        elif similarity > 0.7:
+                            st.warning(f"Close! Answer: '{card['back']}'.")
+                        else:
+                            st.error(f"Incorrect. Answer: {card['back']}")
 
-                # --- TAB 1: FLIP (Classic) ---
-                with tabs[0]:
-                    content = card["back"] if st.session_state.is_flipped else card["front"]
-                    label = "ANSWER" if st.session_state.is_flipped else "QUESTION"
-                    
-                    st.markdown(f"""
-                    <div class="card-container">
-                        <div class="label-text">{label}</div>
-                        <div class="card-text">{content}</div>
-                    </div>
-                    """, unsafe_allow_html=True)
-                    
-                    # Flip Button
-                    flip_label = "Show Question" if st.session_state.is_flipped else "Reveal Answer"
-                    if st.button(flip_label, use_container_width=True):
-                        st.session_state.is_flipped = not st.session_state.is_flipped
-                        st.rerun()
+            # TAB 3: QUIZ
+            if "Quiz" in available_tabs:
+                with tabs[available_tabs.index("Quiz")]:
+                    st.subheader("Choose the correct answer:")
+                    st.info(card["front"])
+                    options = card.get("distractors", []) + [card["back"]]
+                    random.Random(card['id']).shuffle(options)
+                    choice = st.radio("Options:", options, key=f"quiz_{card['id']}")
+                    if st.button("Check Answer", key=f"check_{card['id']}"):
+                        if choice == card["back"]:
+                            st.success("Correct!")
+                            st.balloons()
+                        else:
+                            st.error(f"Wrong! Answer: {card['back']}")
 
-                # --- TAB 2: TYPE ANSWER ---
-                if "Type" in available_tabs:
-                    # Find index of "Type" to use correct tab
-                    with tabs[available_tabs.index("Type")]:
-                        st.subheader("Type your answer:")
-                        st.info(card["front"])
-                        
-                        user_type_input = st.text_input("Your Answer", key=f"type_{card['id']}")
-                        
-                        if user_type_input:
-                            similarity = check_similarity(user_type_input, card["back"])
-                            if similarity == 1.0:
-                                st.success(f"Correct! The answer is indeed: {card['back']}")
-                                st.balloons()
-                            elif similarity > 0.7:
-                                st.warning(f"Close! You wrote '{user_type_input}', but the answer is '{card['back']}'.")
-                            else:
-                                st.error(f"Incorrect. The right answer is: {card['back']}")
+            st.divider()
 
-                # --- TAB 3: QUIZ (Multiple Choice) ---
-                if "Quiz" in available_tabs:
-                    with tabs[available_tabs.index("Quiz")]:
-                        st.subheader("Choose the correct answer:")
-                        st.info(card["front"])
-                        
-                        # Generate options deterministicly based on card ID so they don't reshuffle on click
-                        # We combine distractors + real answer
-                        options = card.get("distractors", []) + [card["back"]]
-                        # Use card ID as seed for shuffle so it stays consistent for this card
-                        random.Random(card['id']).shuffle(options)
-                        
-                        choice = st.radio("Options:", options, key=f"quiz_{card['id']}")
-                        
-                        if st.button("Check Answer", key=f"check_{card['id']}"):
-                            if choice == card["back"]:
-                                st.success("Correct!")
-                                st.balloons()
-                            else:
-                                st.error(f"Wrong! The correct answer was: {card['back']}")
+            # Navigation
+            c1, c3 = st.columns([1, 1])
+            with c1:
+                if st.button("← Prev", use_container_width=True):
+                    st.session_state.is_flipped = False
+                    st.session_state.current_index = (st.session_state.current_index - 1) % len(current_deck)
+                    st.rerun()
+            with c3:
+                if st.button("Next →", use_container_width=True):
+                    st.session_state.is_flipped = False
+                    st.session_state.current_index = (st.session_state.current_index + 1) % len(current_deck)
+                    st.rerun()
 
-                st.divider()
-
-                # Navigation
-                c1, c2, c3 = st.columns([1, 2, 1])
-                with c1:
-                    if st.button("← Prev", use_container_width=True):
-                        st.session_state.is_flipped = False
-                        st.session_state.current_index = (st.session_state.current_index - 1) % len(st.session_state.deck)
-                        st.rerun()
-                with c3:
-                    if st.button("Next →", use_container_width=True):
-                        st.session_state.is_flipped = False
-                        st.session_state.current_index = (st.session_state.current_index + 1) % len(st.session_state.deck)
-                        st.rerun()
-
-                progress = (st.session_state.current_index + 1) / len(st.session_state.deck)
-                st.progress(progress)
+            progress = (st.session_state.current_index + 1) / len(current_deck)
+            st.progress(progress)
+            st.caption(f"Card {st.session_state.current_index + 1} of {len(current_deck)} ({st.session_state.study_order} Order)")
 
     # --- MODE: EDITOR ---
     else:
-        # BULK IMPORT SECTION
-        with st.expander("Bulk Import via CSV", expanded=True):
+        if current_deck:
+            with st.expander("🛠️ Bulk Actions (Select Multiple)", expanded=True):
+                st.write("Select cards to modify:")
+                sel_col1, sel_col2, sel_col3 = st.columns([1, 1, 2])
+                with sel_col1:
+                    if st.button("Select All"):
+                        st.session_state.selected_card_ids = {c['id'] for c in current_deck}
+                with sel_col2:
+                    if st.button("Deselect All"):
+                        st.session_state.selected_card_ids = set()
+                
+                for card in current_deck:
+                    is_checked = card['id'] in st.session_state.selected_card_ids
+                    if st.checkbox(f"{card['front']} ({card['back']})", value=is_checked, key=f"sel_{card['id']}"):
+                        st.session_state.selected_card_ids.add(card['id'])
+                    else:
+                        st.session_state.selected_card_ids.discard(card['id'])
+
+                st.markdown("#### Apply Action")
+                if not st.session_state.selected_card_ids:
+                    st.caption("No cards selected")
+                else:
+                    action_col1, action_col2 = st.columns(2)
+                    with action_col1:
+                        target_list = st.selectbox("Target List", [l for l in st.session_state.deck_data.keys() if l != st.session_state.active_list])
+                    with action_col2:
+                        action_type = st.selectbox("Action", ["Move Selected", "Copy Selected", "Delete Selected"])
+
+                    if st.button(f"Execute: {action_type}"):
+                        selected_cards = [c for c in current_deck if c['id'] in st.session_state.selected_card_ids]
+                        
+                        if action_type == "Delete Selected":
+                            new_deck = [c for c in current_deck if c['id'] not in st.session_state.selected_card_ids]
+                            st.session_state.deck_data[st.session_state.active_list] = new_deck
+                            st.session_state.selected_card_ids = set() 
+                            save_deck(st.session_state.username, st.session_state.deck_data)
+                            st.success("Deleted selected cards.")
+                            st.rerun()
+                        elif target_list:
+                            cards_to_transfer = []
+                            for c in selected_cards:
+                                new_card = c.copy()
+                                new_card['id'] = new_card['id'] + 10000 + random.randint(0,9999)
+                                cards_to_transfer.append(new_card)
+
+                            if action_type == "Copy Selected":
+                                st.session_state.deck_data[target_list].extend(cards_to_transfer)
+                                save_deck(st.session_state.username, st.session_state.deck_data)
+                                st.success(f"Copied {len(cards_to_transfer)} cards to {target_list}.")
+                            elif action_type == "Move Selected":
+                                st.session_state.deck_data[target_list].extend(cards_to_transfer)
+                                new_deck = [c for c in current_deck if c['id'] not in st.session_state.selected_card_ids]
+                                st.session_state.deck_data[st.session_state.active_list] = new_deck
+                                st.session_state.selected_card_ids = set()
+                                save_deck(st.session_state.username, st.session_state.deck_data)
+                                st.success(f"Moved {len(cards_to_transfer)} cards to {target_list}.")
+                                st.rerun()
+
+        st.divider()
+
+        with st.expander("Import via CSV"):
+            st.markdown(f"Adding to list: **{st.session_state.active_list}**")
             st.markdown("""
             **Format:** `Question, Type Code, Answer, Distractor 1, Distractor 2, ...`
-            
-            **Type Codes:**
-            * `1`: Write-in Only
-            * `2`: Multiple Choice Only
-            * `3`: Both
+            Codes: `1`=Write, `2`=Choice, `3`=Both
             """)
             
             csv_input = st.text_area("Paste CSV Data Here", height=150)
@@ -309,39 +444,19 @@ else:
             if st.button("Process Bulk Import"):
                 if csv_input:
                     try:
-                        # Use csv module to handle quoted strings properly
                         f = io.StringIO(csv_input)
                         reader = csv.reader(f, skipinitialspace=True)
-                        
                         added_count = 0
                         for row in reader:
-                            if len(row) < 3:
-                                continue # Skip invalid rows
-                                
-                            front = row[0].strip()
-                            type_code = row[1].strip()
-                            back = row[2].strip()
+                            if len(row) < 3: continue 
+                            front, type_code, back = row[0].strip(), row[1].strip(), row[2].strip()
                             distractors = [d.strip() for d in row[3:] if d.strip()]
-                            
-                            # Logic for types
-                            enable_write = False
-                            enable_choice = False
-                            
-                            if type_code == '1':
-                                enable_write = True
-                            elif type_code == '2':
-                                enable_choice = True
-                            elif type_code == '3':
-                                enable_write = True
-                                enable_choice = True
-                            
-                            # Validation: Disable choice if no distractors
-                            if enable_choice and not distractors:
-                                st.warning(f"Skipping choice mode for '{front}' - no distractors found.")
-                                enable_choice = False
+                            enable_write = type_code in ['1', '3']
+                            enable_choice = type_code in ['2', '3']
+                            if enable_choice and not distractors: enable_choice = False
 
-                            st.session_state.deck.append({
-                                "id": len(st.session_state.deck) + 1000 + random.randint(0, 9999),
+                            st.session_state.deck_data[st.session_state.active_list].append({
+                                "id": random.randint(100000, 999999),
                                 "front": front,
                                 "back": back,
                                 "enable_write": enable_write,
@@ -350,73 +465,54 @@ else:
                             })
                             added_count += 1
                         
-                        save_deck(st.session_state.username, st.session_state.deck)
-                        st.success(f"Successfully added {added_count} cards!")
+                        save_deck(st.session_state.username, st.session_state.deck_data)
+                        st.success(f"Added {added_count} cards to {st.session_state.active_list}!")
                         st.rerun()
-                        
                     except Exception as e:
                         st.error(f"Error parsing CSV: {e}")
 
         st.divider()
         st.subheader("Add Single Card")
-        
         with st.form("add_card_form", clear_on_submit=True):
             new_front = st.text_input("Front (Question)")
             new_back = st.text_input("Back (Answer)")
             
-            st.markdown("#### Interaction Options")
             col_opts_1, col_opts_2 = st.columns(2)
-            with col_opts_1:
-                enable_write = st.checkbox("Enable Typing Answer")
-            with col_opts_2:
-                enable_choice = st.checkbox("Enable Multiple Choice")
-                
-            distractors_input = st.text_area("Wrong Answers (one per line) - Only for Multiple Choice")
+            with col_opts_1: enable_write = st.checkbox("Enable Typing")
+            with col_opts_2: enable_choice = st.checkbox("Enable Choice")
             
-            submitted = st.form_submit_button("Add Card")
+            distractors_input = st.text_area("Wrong Answers (one per line)")
+            submitted = st.form_submit_button(f"Add to {st.session_state.active_list}")
             
             if submitted and new_front and new_back:
                 distractors_list = [line.strip() for line in distractors_input.split('\n') if line.strip()]
-                
                 if enable_choice and not distractors_list:
-                    st.error("You enabled Multiple Choice but didn't provide any wrong answers!")
+                    st.error("Missing wrong answers for multiple choice!")
                 else:
-                    st.session_state.deck.append({
-                        "id": len(st.session_state.deck) + 100, 
+                    st.session_state.deck_data[st.session_state.active_list].append({
+                        "id": random.randint(100000, 999999), 
                         "front": new_front,
                         "back": new_back,
                         "enable_write": enable_write,
                         "enable_choice": enable_choice,
                         "distractors": distractors_list
                     })
-                    save_deck(st.session_state.username, st.session_state.deck)
-                    st.success("Card added!")
+                    save_deck(st.session_state.username, st.session_state.deck_data)
+                    st.success(f"Card added to {st.session_state.active_list}!")
                     st.rerun()
 
-        st.subheader("Your Deck")
-        for i, card in enumerate(st.session_state.deck):
+        st.subheader(f"Cards in '{st.session_state.active_list}'")
+        for i, card in enumerate(current_deck):
             with st.expander(f"{i+1}. {card['front']}"):
                 st.write(f"**Answer:** {card['back']}")
                 modes = ["Flip"]
                 if card.get("enable_write"): modes.append("Type")
                 if card.get("enable_choice"): modes.append("Quiz")
                 st.caption(f"Modes: {', '.join(modes)}")
-                
                 if card.get("distractors"):
-                     st.write(f"**Wrong Options:** {', '.join(card['distractors'])}")
+                     st.write(f"**Distractors:** {', '.join(card['distractors'])}")
                      
-                if st.button("Delete", key=f"del_{card['id']}"):
-                    st.session_state.deck.pop(i)
-                    save_deck(st.session_state.username, st.session_state.deck)
-                    if st.session_state.current_index >= len(st.session_state.deck):
-                        st.session_state.current_index = max(0, len(st.session_state.deck) - 1)
+                if st.button("Delete Card", key=f"del_{card['id']}"):
+                    st.session_state.deck_data[st.session_state.active_list].pop(i)
+                    save_deck(st.session_state.username, st.session_state.deck_data)
                     st.rerun()
-
-        if st.button("Export Deck to JSON"):
-            json_str = json.dumps(st.session_state.deck, indent=2)
-            st.download_button(
-                label="Download JSON",
-                data=json_str,
-                file_name=f"{st.session_state.username}_deck.json",
-                mime="application/json"
-            )
